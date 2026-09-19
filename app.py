@@ -1,7 +1,9 @@
 """Streamlit Web Application: mcp-p2p-swarm-mesh Control Center."""
 
 import asyncio
+import base64
 import json
+import os
 import time
 import uuid
 import streamlit as st
@@ -24,6 +26,7 @@ from mcp_mesh.consensus.orchestrator import SwarmConsensusEngine
 from mcp_mesh.discovery.detector import FailureDetector
 from mcp_mesh.protocol.messages import MessageType
 from mcp_mesh.protocol.framing import FrameCodec
+from mcp_mesh.audio.transcriber import AudioTranscriber
 
 # --- PAGE CONFIG ---
 st.set_page_config(
@@ -259,12 +262,69 @@ def init_cluster_state():
             load_average=0.08,
         )
 
+        # Peer 5: Audio to Text (STT) Transcription Node
+        p5 = PeerNodeRecord(
+            node_id="node_audio_transcriber_05",
+            host="127.0.0.1",
+            tcp_port=9500,
+            udp_port=9501,
+            public_key_hex="e5f6a1b2c3d40718293a4b5c6d7e8f94",
+            status=PeerStatus.ALIVE,
+            last_heartbeat=now,
+            tools=[
+                MeshToolDefinition(
+                    name="transcribe_audio_file",
+                    description="Transcribes an audio file (WAV, MP3, FLAC, OGG) on disk into text with segment timings.",
+                    input_schema=ToolParameterSchema(
+                        properties={
+                            "file_path": {"type": "string"},
+                            "language": {"type": "string", "default": "en"},
+                            "context_prompt": {"type": "string", "default": ""},
+                        },
+                        required=["file_path"],
+                    ),
+                    rate_limit_rpm=30,
+                ),
+                MeshToolDefinition(
+                    name="inspect_audio_metadata",
+                    description="Analyzes audio technical properties, codec, channels, sample rate, and RMS energy.",
+                    input_schema=ToolParameterSchema(
+                        properties={"file_path": {"type": "string"}},
+                        required=["file_path"],
+                    ),
+                ),
+                MeshToolDefinition(
+                    name="transcribe_audio_base64",
+                    description="Transcribes base64-encoded audio payload directly over the mesh JSON-RPC protocol.",
+                    input_schema=ToolParameterSchema(
+                        properties={
+                            "audio_base64": {"type": "string"},
+                            "filename": {"type": "string", "default": "audio.wav"},
+                            "language": {"type": "string", "default": "en"},
+                        },
+                        required=["audio_base64"],
+                    ),
+                ),
+            ],
+            resources=[
+                MeshResourceDefinition(
+                    uri="audio://transcription/status",
+                    name="Audio Transcription Engine Status",
+                    description="Status of acoustic STT engine and supported audio codecs",
+                )
+            ],
+            load_average=0.22,
+        )
+
         registry.update_peer(p1)
         registry.update_peer(p2)
         registry.update_peer(p3)
         registry.update_peer(p4)
+        registry.update_peer(p5)
 
         # Register execution handlers for demonstration
+        audio_engine = AudioTranscriber()
+
         def execute_sql(query: str):
             return {"status": "SUCCESS", "rows_returned": 3, "sample": [{"id": 1, "result": "Query output OK"}]}
 
@@ -278,9 +338,60 @@ def init_cluster_state():
                 a, b = b, a + b
             return {"n": n, "fibonacci_value": a}
 
+        def transcribe_file(file_path: str, language: str = "en", context_prompt: str = ""):
+            if not os.path.exists(file_path):
+                return {"status": "ERROR", "error": f"File {file_path} not found"}
+            with open(file_path, "rb") as f:
+                data = f.read()
+            res = audio_engine.transcribe(data, filename=os.path.basename(file_path), language=language, context_prompt=context_prompt or None)
+            return {
+                "status": res.status,
+                "text": res.text,
+                "duration_seconds": res.duration_seconds,
+                "sample_rate": res.sample_rate,
+                "channels": res.channels,
+                "word_count": res.word_count,
+                "confidence": res.confidence,
+                "segments": res.segments,
+            }
+
+        def inspect_audio(file_path: str):
+            if not os.path.exists(file_path):
+                return {"status": "ERROR", "error": f"File {file_path} not found"}
+            with open(file_path, "rb") as f:
+                data = f.read()
+            m = audio_engine.inspect_metadata(data, filename=os.path.basename(file_path))
+            return {
+                "status": "SUCCESS",
+                "format": m.format,
+                "duration_seconds": m.duration_seconds,
+                "sample_rate": m.sample_rate,
+                "channels": m.channels,
+                "rms_energy": m.rms_energy,
+                "peak_amplitude": m.peak_amplitude,
+            }
+
+        def transcribe_b64(audio_base64: str, filename: str = "audio.wav", language: str = "en"):
+            import base64
+            data = base64.b64decode(audio_base64)
+            res = audio_engine.transcribe(data, filename=filename, language=language)
+            return {
+                "status": res.status,
+                "text": res.text,
+                "duration_seconds": res.duration_seconds,
+                "sample_rate": res.sample_rate,
+                "channels": res.channels,
+                "word_count": res.word_count,
+                "confidence": res.confidence,
+                "segments": res.segments,
+            }
+
         dispatcher.register_local_handler("execute_sql_query", execute_sql)
         dispatcher.register_local_handler("analyze_sentiment", analyze_sentiment)
         dispatcher.register_local_handler("calculate_fibonacci", fibonacci)
+        dispatcher.register_local_handler("transcribe_audio_file", transcribe_file)
+        dispatcher.register_local_handler("inspect_audio_metadata", inspect_audio)
+        dispatcher.register_local_handler("transcribe_audio_base64", transcribe_b64)
 
         st.session_state.gw_identity = gw_identity
         st.session_state.registry = registry
@@ -424,11 +535,12 @@ with m5:
 st.markdown("<br>", unsafe_allow_html=True)
 
 # --- MAIN NAVIGATION TABS ---
-tab_topology, tab_registry, tab_delegation, tab_consensus, tab_security = st.tabs([
+tab_topology, tab_registry, tab_delegation, tab_consensus, tab_audio, tab_security = st.tabs([
     "🌐 Mesh Topology Matrix",
     "📋 Capability Registry Browser",
     "⚡ Task Delegation Workbench",
     "🤝 Swarm Consensus Chamber",
+    "🎙️ Audio to Text (STT) Studio",
     "🔒 Security & Framing Telemetry",
 ])
 
@@ -687,7 +799,148 @@ with tab_consensus:
                     st.error(f"Consensus Quorum Failure: {e}")
 
 # ==============================================================================
-# TAB 5: SECURITY & FRAMING TELEMETRY
+# TAB 5: AUDIO TO TEXT (STT) STUDIO
+# ==============================================================================
+with tab_audio:
+    st.markdown("### 🎙️ Audio to Text (STT) Mesh Studio")
+    st.caption("Delegate audio transcription payloads to `node_audio_transcriber_05` over the secure P2P mesh fabric.")
+
+    col_audio_in, col_audio_out = st.columns([1, 1])
+
+    with col_audio_in:
+        st.markdown("#### 1. Audio Source Selection")
+        audio_mode = st.radio(
+            "Select Audio Input Mode",
+            ["Generate Synthetic Speech WAV", "Upload Audio File (.wav, .mp3, .flac)"],
+            horizontal=True,
+        )
+
+        audio_bytes = None
+        audio_name = "sample.wav"
+
+        if audio_mode == "Generate Synthetic Speech WAV":
+            st.caption("Generate a valid 16kHz PCM audio waveform in-memory for instant testing.")
+            c_dur, c_freq = st.columns(2)
+            with c_dur:
+                synth_dur = st.slider("Duration (seconds)", 1.0, 8.0, 3.0, 0.5)
+            with c_freq:
+                synth_freq = st.selectbox("Base Tone Frequency", [220.0, 440.0, 880.0], index=1)
+
+            speech_context = st.selectbox(
+                "Simulated Speech Topic / Context",
+                [
+                    "The decentralized multi-agent swarm router has received the audio payload and performed speech-to-text conversion successfully.",
+                    "Reviewing security patch 402 for rate limiting and nonce replay prevention.",
+                    "Executing analytical SQL query on local distributed data store.",
+                    "Autonomous software engineering mesh is operating with high consensus.",
+                ],
+            )
+            audio_bytes = AudioTranscriber.generate_synthetic_wav(duration_seconds=synth_dur, frequency=synth_freq)
+            audio_name = "synthetic_speech.wav"
+        else:
+            uploaded_file = st.file_uploader("Upload an audio file", type=["wav", "mp3", "flac", "ogg"])
+            if uploaded_file is not None:
+                audio_bytes = uploaded_file.read()
+                audio_name = uploaded_file.name
+
+        if audio_bytes:
+            st.markdown("#### 2. Audio Preview Player")
+            st.audio(audio_bytes, format="audio/wav")
+
+            col_a1, col_a2 = st.columns(2)
+            with col_a1:
+                btn_transcribe = st.button("🚀 Transcribe Audio via Mesh", type="primary", use_container_width=True)
+            with col_a2:
+                btn_meta = st.button("🔍 Inspect Waveform Metadata", use_container_width=True)
+        else:
+            st.info("Select or generate audio above to begin transcription.")
+            btn_transcribe = False
+            btn_meta = False
+
+    with col_audio_out:
+        st.markdown("#### 3. Real-Time Mesh Transcription Output")
+
+        if btn_meta and audio_bytes:
+            with st.spinner("Analyzing technical audio telemetry..."):
+                engine = AudioTranscriber()
+                meta = engine.inspect_metadata(audio_bytes, filename=audio_name)
+                st.success("Metadata Inspection Complete")
+                st.json({
+                    "Format": meta.format,
+                    "Duration (s)": meta.duration_seconds,
+                    "Sample Rate": f"{meta.sample_rate} Hz",
+                    "Channels": "Stereo" if meta.channels == 2 else "Mono",
+                    "RMS Energy": meta.rms_energy,
+                    "Peak Amplitude": meta.peak_amplitude,
+                })
+
+        if btn_transcribe and audio_bytes:
+            with st.spinner("Issuing capability token & delegating to `node_audio_transcriber_05`..."):
+                b64_audio = base64.b64encode(audio_bytes).decode("utf-8")
+                t_start = time.perf_counter()
+
+                loop = asyncio.new_event_loop()
+                try:
+                    res = loop.run_until_complete(
+                        st.session_state.dispatcher.delegate_task(
+                            target_node_id="node_audio_transcriber_05",
+                            tool_name="transcribe_audio_base64",
+                            arguments={"audio_base64": b64_audio, "filename": audio_name},
+                            timeout_seconds=15.0,
+                        )
+                    )
+                    loop.close()
+                    t_end = time.perf_counter()
+                    elapsed_ms = (t_end - t_start) * 1000.0
+
+                    # Parse output
+                    if isinstance(res, dict) and "content" in res:
+                        raw_txt = res["content"][0]["text"]
+                        try:
+                            data = json.loads(raw_txt)
+                        except Exception:
+                            data = {"text": raw_txt, "status": "SUCCESS"}
+                    else:
+                        data = res
+
+                    st.markdown(
+                        f"""
+                        <div style="background: rgba(0, 240, 255, 0.1); border: 1px solid #00f0ff; border-radius: 8px; padding: 14px; margin-bottom: 14px;">
+                            <div style="font-size:0.8rem; color:#94a3b8; text-transform:uppercase;">Transcribed Speech Content</div>
+                            <div style="font-size:1.15rem; color:#f8fafc; font-weight:600; margin-top:4px;">"{data.get('text', '')}"</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                    c_m1, c_m2, c_m3, c_m4 = st.columns(4)
+                    c_m1.metric("Words", data.get("word_count", len(data.get("text", "").split())))
+                    c_m2.metric("Confidence", f"{data.get('confidence', 0.95) * 100:.1f}%")
+                    c_m3.metric("Duration", f"{data.get('duration_seconds', 0.0):.2f}s")
+                    c_m4.metric("Latency", f"{elapsed_ms:.1f}ms")
+
+                    segments = data.get("segments", [])
+                    if segments:
+                        st.markdown("##### ⏱️ Timestamped Audio Segments")
+                        seg_rows = [
+                            {
+                                "Start": f"{s.get('start', 0.0):.2f}s",
+                                "End": f"{s.get('end', 0.0):.2f}s",
+                                "Segment Transcript": s.get("text", ""),
+                                "Confidence": f"{s.get('confidence', 0.92) * 100:.1f}%",
+                            }
+                            for s in segments
+                        ]
+                        st.table(seg_rows)
+
+                    with st.expander("Inspect Raw JSON-RPC Response"):
+                        st.json(data)
+
+                except Exception as err:
+                    st.error(f"Audio transcription error: {err}")
+
+# ==============================================================================
+# TAB 6: SECURITY & FRAMING TELEMETRY
 # ==============================================================================
 with tab_security:
     st.markdown("### Protocol Specifications & Cryptographic Telemetry")
