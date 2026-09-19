@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-p2p-swarm-mesh"
+version = "0.1.0"
+description = "Decentralized Multi-Agent P2P MCP Router & Swarm Mesh"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.2.0",
+    "pydantic>=2.6.0",
+    "cryptography>=42.0.0",
+    "pyjwt>=2.8.0",
+    "streamlit>=1.32.0",
+    "networkx>=3.2.0",
+    "starlette>=0.37.0",
+    "sse-starlette>=2.0.0",
+    "uvicorn>=0.28.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "mypy>=1.9.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
